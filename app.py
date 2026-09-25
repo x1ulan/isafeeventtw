@@ -1,55 +1,100 @@
+import requests
+from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
-import time
+from selenium.webdriver.support.ui import WebDriverWait
+
+TIMES = 60
+SITE_URL = "https://isafeevent.moe.edu.tw"
+LOGIN_OK_SELECTOR = "button[data-href=\"/member/\"]" 
+
+ANSWERS = [
+    "NoUse", 2, 3, 2, 4, 2, 3, 1, 4, 3, 3, 2, 3,
+    3, 2, 2, 3, 3, 2, 4, 2, 4, 1, 3, 2,
+    4, 2, 2, 4, 2, 2, 2, 1, 2, 4, 3, 3,
+    3, 4, 1, 4, 2, 2, 3, 3, 3, 2, 2, 2
+]
 
 driver = webdriver.Chrome()
-url = 'https://isafeevent.moe.edu.tw'
-username = 'EDU_SSO_USERNAME'
-password = 'EDU_SSO_PASSWORD'
-timeout = 0.5
-ans = [2,4,1,3,3,2,4,1,4,4,2,4,3,4,3,2]
 
+try:
+    driver.get(SITE_URL)
+    WebDriverWait(driver, 300).until(
+        lambda d: d.find_elements(By.CSS_SELECTOR, LOGIN_OK_SELECTOR)
+    )
+    cookies = driver.get_cookies()
+finally:
+    driver.quit()
 
-def login(username, password):
-    driver.get(url + '/cloudoauth/authenticate/')
-    namebox = driver.find_element(By.NAME, 'user')
-    pswdbox = driver.find_element(By.NAME, 'pwd')
-    captcha = driver.find_element(By.NAME, 'captchatext')
+s = requests.Session()
+s.headers.update({
+    "Referer": SITE_URL + "/",
+    "User-Agent": "Mozilla/5.0",
+})
 
-    namebox.send_keys(username)
-    pswdbox.send_keys(password)
+for cookie in cookies:
+    s.cookies.set(
+        cookie["name"],
+        cookie["value"],
+        domain=cookie["domain"],
+        path=cookie.get("path", "/"),
+    )
 
-    while len(captcha.get_attribute('value')) < 3:
-        time.sleep(timeout)
+if not s.cookies.get("sessionid"):
+    raise RuntimeError("Login failed: No sessionid found.")
 
-    captcha.send_keys(Keys.RETURN)
+csrftoken = s.cookies.get("csrftoken")
+if not csrftoken:
+    raise RuntimeError("Login failed: No csrftoken found.")
 
-def action():
-    driver.get(url)
-    time.sleep(timeout)
-    startbtn1 = driver.find_element(By.CLASS_NAME, 'btn.rounded-pill.px-5.btn-green.shadow')
-    startbtn1.send_keys(Keys.ENTER)
-    startbtn2 = driver.find_element(By.CLASS_NAME, 'btnStartExam')
-    startbtn2.send_keys(Keys.ENTER)
-    time.sleep(timeout)
-    for i in range(1,17):
-        obj = driver.find_element(By.ID, f'q_{i}_5')
-        driver.execute_script("arguments[0].click();", obj)
-    submitbtn1 = driver.find_element(By.CLASS_NAME, 'btnSendExam')
-    submitbtn1.send_keys(Keys.ENTER)
-    time.sleep(timeout)
-    for i in range(1, 17):
-        obj = driver.find_element(By.ID, f'q_{i}_{ans[i-1]}')
-        driver.execute_script("arguments[0].click();", obj)
-    submitbtn2 = driver.find_element(By.CLASS_NAME, 'btnSendExam')
-    submitbtn2.send_keys(Keys.ENTER)
+for i in range(TIMES):
+    req = s.post(
+        f"{SITE_URL}/ajax/exam/get/",
+        data={
+            "exam": "",
+            "target": "01",
+            "csrfmiddlewaretoken": csrftoken,
+        },
+        timeout=10,
+    )
+    req.raise_for_status()
+    examid = req.json()["exam"]
 
-def main():
-    login(username, password)
-    time.sleep(timeout*3)
-    for i in range(150):
-        action()
-        time.sleep(timeout*3)
-    
-main()
+    req2 = s.post(
+        f"{SITE_URL}/ajax/exam/answer2/",
+        data={
+            "exam": examid,
+            "csrfmiddlewaretoken": csrftoken,
+            "answers": ",".join(["5"] * 16),
+        },
+        timeout=10,
+    )
+    req2.raise_for_status()
+
+    req3 = s.get(f"{SITE_URL}/exam/do/{examid}", timeout=10)
+    req3.raise_for_status()
+
+    soup = BeautifulSoup(req3.text, "html.parser")
+    questions = soup.select(".question")
+
+    answers = []
+    for q in questions:
+        option = q.select_one("input[id^='q_']")
+        if option is None:
+            raise ValueError("Fail to get questions.")
+
+        qid = int(option["id"].split("_")[1])
+        answers.append(str(ANSWERS[qid]))
+
+    req4 = s.post(
+        f"{SITE_URL}/ajax/exam/answer/",
+        data={
+            "exam": examid,
+            "csrfmiddlewaretoken": csrftoken,
+            "answers": ",".join(answers),
+        },
+        timeout=10,
+    )
+    req4.raise_for_status()
+
+    print(f"[{i+1:02d}] {','.join(answers)}")
